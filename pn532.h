@@ -6,7 +6,7 @@
  *  Header file for pn532.c
  *  
  *  Check out the links above for our tutorials and wiring diagrams 
- *  These chips use SPI communicate.
+ *  These chips use I2C communicate.
  *  
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documnetation files (the "Software"), to deal
@@ -83,11 +83,6 @@ extern "C" {
 #define PN532_RESPONSE_INLISTPASSIVETARGET  (0x4B)
 
 #define PN532_WAKEUP                        (0x55)
-
-#define PN532_SPI_STATREAD                  (0x02)
-#define PN532_SPI_DATAWRITE                 (0x01)
-#define PN532_SPI_DATAREAD                  (0x03)
-#define PN532_SPI_READY                     (0x01)
 
 #define PN532_I2C_ADDRESS                   (0x48 >> 1)
 #define PN532_I2C_READBIT                   (0x01)
@@ -238,6 +233,7 @@ extern "C" {
 /* End: Official PN532 Errors Definitions */
 
 // Other Error Definitions
+#define PN532_STATUS_WAITING                                            (-2)
 #define PN532_STATUS_ERROR                                              (-1)
 #define PN532_STATUS_OK                                                 (0)
 

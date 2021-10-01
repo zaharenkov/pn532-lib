@@ -6,7 +6,7 @@
  *  This is a library for the Waveshare PN532 NFC modules
  *  
  *  Check out the links above for our tutorials and wiring diagrams 
- *  These chips use SPI communicate.
+ *  These chips use I2C communicate.
  *  
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documnetation files (the "Software"), to deal
@@ -32,9 +32,11 @@
 
 const uint8_t PN532_ACK[] = {0x00, 0x00, 0xFF, 0x00, 0xFF, 0x00};
 const uint8_t PN532_FRAME_START[] = {0x00, 0x00, 0xFF};
+static int8_t non_block_status = PN532_STATUS_OK;
 
 #define PN532_FRAME_MAX_LENGTH              255
 #define PN532_DEFAULT_TIMEOUT               1000
+#define PN532_NON_BLOCK_TIMEOUT             111
 
 /**
   * @brief: Write a frame to the PN532 of at most length bytes in size.
@@ -83,7 +85,7 @@ int PN532_WriteFrame(PN532* pn532, uint8_t* data, uint16_t length) {
   */
 int PN532_ReadFrame(PN532* pn532, uint8_t* response, uint16_t length) {
     uint8_t buff[PN532_FRAME_MAX_LENGTH + 7];
-    uint8_t checksum = 0;
+    uint16_t checksum = 0;
     // Read frame with expected length of data.
     pn532->read_data(buff, length + 7);
     // Swallow all the 0x00 values that preceed 0xFF.
@@ -91,23 +93,23 @@ int PN532_ReadFrame(PN532* pn532, uint8_t* response, uint16_t length) {
     while (buff[offset] == 0x00) {
         offset += 1;
         if (offset >= length + 8){
-            pn532->log("Response frame preamble does not contain 0x00FF!");
+            //pn532->log("Response frame preamble does not contain 0x00FF!");
             return PN532_STATUS_ERROR;
         }
     }
     if (buff[offset] != 0xFF) {
-        pn532->log("Response frame preamble does not contain 0x00FF!");
+        //pn532->log("Response frame preamble does not contain 0x00FF!");
         return PN532_STATUS_ERROR;
     }
     offset += 1;
     if (offset >= length + 8) {
-        pn532->log("Response contains no data!");
+        //pn532->log("Response contains no data!");
         return PN532_STATUS_ERROR;
     }
     // Check length & length checksum match.
     uint8_t frame_len = buff[offset];
     if (((frame_len + buff[offset+1]) & 0xFF) != 0) {
-        pn532->log("Response length checksum did not match length!");
+        //pn532->log("Response length checksum did not match length!");
         return PN532_STATUS_ERROR;
     }
     // Check frame checksum value matches bytes.
@@ -116,7 +118,7 @@ int PN532_ReadFrame(PN532* pn532, uint8_t* response, uint16_t length) {
     }
     checksum &= 0xFF;
     if (checksum != 0) {
-        pn532->log("Response checksum did not match expected checksum");
+        //pn532->log("Response checksum did not match expected checksum");
         return PN532_STATUS_ERROR;
     }
     // Return frame data.
@@ -128,8 +130,8 @@ int PN532_ReadFrame(PN532* pn532, uint8_t* response, uint16_t length) {
 
 /**
   * @brief: Send specified command to the PN532 and expect up to response_length.
-  *     Will wait up to timeout seconds for a response and read a bytearray into
-  *     response buffer.
+  *     Will wait up to timeout seconds for a response and read a bytearray into response buffer.
+  *     or Will wait for interrupt (P70_IRQ) and read a bytearray into response buffer.
   * @param pn532: PN532 handler
   * @param command: command to send
   * @param response: buffer returned
@@ -138,7 +140,11 @@ int PN532_ReadFrame(PN532* pn532, uint8_t* response, uint16_t length) {
   *     to the function call, or NULL if there is no need to send parameters.
   * @param params_length: length of the argument params
   * @param timeout: timout of systick
-  * @retval: Returns the length of response or -1 if error.
+  * @retval: Returns the length of response or -1 if error, or -2 if WAITING for card.
+  * 
+  * NOTE: if timeout == PN532_NON_BLOCK_TIMEOUT, then we send frame and exit with status PN532_STATUS_WAITING.
+  * After 2rd interrupt occurs we should call function again with normal timeout param and get card's UID.
+  * 1st interrupt occurs immeadetaly after PN532_WriteFrame, so don't need to pay attention on it.
   */
 int PN532_CallFunction(
     PN532* pn532,
@@ -153,41 +159,53 @@ int PN532_CallFunction(
     uint8_t buff[PN532_FRAME_MAX_LENGTH];
     buff[0] = PN532_HOSTTOPN532;
     buff[1] = command & 0xFF;
-    for (uint8_t i = 0; i < params_length; i++) {
-        buff[2 + i] = params[i];
-    }
-    // Send frame and wait for response.
-    if (PN532_WriteFrame(pn532, buff, params_length + 2) != PN532_STATUS_OK) {
-        pn532->wakeup();
-        pn532->log("Trying to wakeup");
+    for (uint8_t i = 0; i < params_length; i++) 
+      buff[2 + i] = params[i];
+
+    if ((non_block_status != PN532_STATUS_WAITING) || (timeout == PN532_NON_BLOCK_TIMEOUT))
+    {
+      // Send frame and wait for response.
+      if (PN532_WriteFrame(pn532, buff, params_length + 2) != PN532_STATUS_OK) 
         return PN532_STATUS_ERROR;
-    }
-    if (!pn532->wait_ready(timeout)) {
+    
+      if (!pn532->wait_ready(timeout))
         return PN532_STATUS_ERROR;
-    }
-    // Verify ACK response and wait to be ready for function response.
-    pn532->read_data(buff, sizeof(PN532_ACK));
-    for (uint8_t i = 0; i < sizeof(PN532_ACK); i++) {
-        if (PN532_ACK[i] != buff[i]) {
-            pn532->log("Did not receive expected ACK from PN532!");
-            return PN532_STATUS_ERROR;
+
+      // Verify ACK response and wait to be ready for function response.
+      pn532->read_data(buff, sizeof(PN532_ACK));
+      for (uint8_t i = 0; i < sizeof(PN532_ACK); i++) 
+      {
+        if (PN532_ACK[i] != buff[i]) 
+        {
+          //pn532->log("Did not receive expected ACK from PN532!");
+          return PN532_STATUS_ERROR;
         }
+      }
+      if (timeout == PN532_NON_BLOCK_TIMEOUT)
+      {
+        non_block_status = PN532_STATUS_WAITING;
+        return PN532_STATUS_WAITING;
+      }
     }
-    if (!pn532->wait_ready(timeout)) {
-        return PN532_STATUS_ERROR;
-    }
+
+    non_block_status = PN532_STATUS_OK;    
+
+    if (!pn532->wait_ready(timeout)) 
+      return PN532_STATUS_ERROR;
+
     // Read response bytes.
     int frame_len = PN532_ReadFrame(pn532, buff, response_length + 2);
 
     // Check that response is for the called function.
-    if (! ((buff[0] == PN532_PN532TOHOST) && (buff[1] == (command+1)))) {
-        pn532->log("Received unexpected command response!");
-        return PN532_STATUS_ERROR;
+    if (! ((buff[0] == PN532_PN532TOHOST) && (buff[1] == (command+1)))) 
+    {
+      //pn532->log("Received unexpected command response!");
+      return PN532_STATUS_ERROR;
     }
     // Return response data.
-    for (uint8_t i = 0; i < response_length; i++) {
-        response[i] = buff[i + 2];
-    }
+    for (uint8_t i = 0; i < response_length; i++) 
+      response[i] = buff[i + 2];
+
     // The the number of bytes read
     return frame_len - 2;
 }
@@ -200,7 +218,7 @@ int PN532_GetFirmwareVersion(PN532* pn532, uint8_t* version) {
     // length of version: 4
     if (PN532_CallFunction(pn532, PN532_COMMAND_GETFIRMWAREVERSION,
                            version, 4, NULL, 0, 500) == PN532_STATUS_ERROR) {
-        pn532->log("Failed to detect the PN532");
+        //pn532->log("Failed to detect the PN532");
         return PN532_STATUS_ERROR;
     }
     return PN532_STATUS_OK;
@@ -226,7 +244,7 @@ int PN532_SamConfiguration(PN532* pn532) {
   * @brief: Wait for a MiFare card to be available and return its UID when found.
   *     Will wait up to timeout seconds and return None if no card is found,
   *     otherwise a bytearray with the UID of the found card is returned.
-  * @retval: Length of UID, or -1 if error.
+  * @retval: Length of UID, or -1 if error, or -2 if WAITING for card
   */
 int PN532_ReadPassiveTarget(
     PN532* pn532,
@@ -239,21 +257,25 @@ int PN532_ReadPassiveTarget(
     uint8_t buff[19];
     int length = PN532_CallFunction(pn532, PN532_COMMAND_INLISTPASSIVETARGET,
                         buff, sizeof(buff), params, sizeof(params), timeout);
-    if (length < 0) {
-        return PN532_STATUS_ERROR; // No card found
-    }
+    if (length == PN532_STATUS_WAITING) 
+      return PN532_STATUS_WAITING;
+    else if (length < 0) 
+      return PN532_STATUS_ERROR; // No card found
+    
     // Check only 1 card with up to a 7 byte UID is present.
-    if (buff[0] != 0x01) {
-        pn532->log("More than one card detected!");
-        return PN532_STATUS_ERROR;
+    if (buff[0] != 0x01) 
+    {
+      //pn532->log("More than one card detected!");
+      return PN532_STATUS_ERROR;
     }
-    if (buff[5] > 7) {
-        pn532->log("Found card with unexpectedly long UID!");
-        return PN532_STATUS_ERROR;
+    if (buff[5] > 7) 
+    {
+      //pn532->log("Found card with unexpectedly long UID!");
+      return PN532_STATUS_ERROR;
     }
-    for (uint8_t i = 0; i < buff[5]; i++) {
-        response[i] = buff[6 + i];
-    }
+    for (uint8_t i = 0; i < buff[5]; i++) 
+      response[i] = buff[6 + i];
+
     return buff[5];
 }
 
@@ -264,6 +286,7 @@ int PN532_ReadPassiveTarget(
   * @param block_number: The block to authenticate.
   * @param key_number: The key type (like MIFARE_CMD_AUTH_A or MIFARE_CMD_AUTH_B).
   * @param key: A byte array with the key data.
+  * @retval: true if the block was authenticated, or false if not authenticated.
   * @retval: PN532 error code.
   */
 int PN532_MifareClassicAuthenticateBlock(
